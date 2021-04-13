@@ -56,6 +56,7 @@ export class TextFileEditor extends BaseTextEditor {
 	) {
 		super(TextFileEditor.ID, telemetryService, instantiationService, storageService, textResourceConfigurationService, themeService, editorService, editorGroupService);
 
+		console.log('DEBUG:TextFileEditor create By EditorDescriptor', TextFileEditor.ID);
 		// Clear view state for deleted files
 		this._register(this.fileService.onDidFilesChange(e => this.onDidFilesChange(e)));
 
@@ -106,6 +107,7 @@ export class TextFileEditor extends BaseTextEditor {
 
 	async setInput(input: FileEditorInput, options: EditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 
+		console.log('DEBUG:setInput.doSaveOrClearTextEditorViewState');
 		// Update/clear view settings if input changes
 		this.doSaveOrClearTextEditorViewState(this.input);
 

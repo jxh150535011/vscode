@@ -1478,7 +1478,7 @@ class EditorInputFactoryRegistry implements IEditorInputFactoryRegistry {
 
 	start(accessor: ServicesAccessor): void {
 		const instantiationService = this.instantiationService = accessor.get(IInstantiationService);
-
+		console.log('DEBUG:IEditorInputFactoryRegistry:start', this.editorInputSerializerConstructors);
 		this.editorInputSerializerConstructors.forEach((ctor, key) => {
 			this.createEditorInputSerializer(key, ctor, instantiationService);
 		});
@@ -1554,10 +1554,10 @@ export async function pathsToEditors(paths: IPathData[] | undefined, fileService
 			},
 			pinned: true,
 			override: path.editorOverrideId
-		} : {
+		} : ({
 			pinned: true,
 			override: path.editorOverrideId
-		};
+		});
 
 		let input: IResourceEditorInput | IUntitledTextResourceEditorInput;
 		if (!exists) {

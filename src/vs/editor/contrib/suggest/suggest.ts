@@ -187,32 +187,113 @@ export class CompletionItemModel {
 		readonly needsClipboard: boolean,
 		readonly durations: CompletionDurations,
 		readonly disposable: IDisposable,
+		readonly inactiveProvider: Set<modes.CompletionItemProvider> | undefined,
 	) { }
 }
 
-export async function provideSuggestionItems(
+function delay(wait: number) {
+	return new Promise((resolve) => setTimeout(resolve, wait));
+}
+/**
+ * update gts 2020-04-12
+ * 模拟一个智能提示遮罩
+ * @param model
+ * @param position
+ * @param context
+ * @param token
+ */
+export async function provideSuggestionMaskItems(
+	providerSuggestionGroup: ProviderSuggestionGroup,
+	model: ITextModel,
+	position: Position,
+	context: modes.CompletionContext = { triggerKind: modes.CompletionTriggerKind.Invoke },
+	token: CancellationToken = CancellationToken.None
+) {
+	const maskCompletionItemProvider: modes.CompletionItemProvider = {
+		provideCompletionItems(model, position, context, token) {
+			const wordPos = model.getWordUntilPosition(position);
+			const range = {
+				startLineNumber: position.lineNumber,
+				endLineNumber: position.lineNumber,
+				startColumn: wordPos.startColumn,
+				endColumn: wordPos.endColumn,
+			};
+			const suggestions: modes.CompletionItem[] = [
+				{
+					label: wordPos.word,
+					// sortText: 'test',
+					// filterText: 'test',
+					kind: modes.CompletionItemKind.Function,
+					// documentation: '恰当的说明',
+					detail: '正在计算中',
+					insertText: wordPos.word,
+					range,
+				},
+			];
+			// incomplete?: boolean;
+			// dispose?(): void;
+			// editorIsComposing 后续的多次输入会额外触发 _refilterCompletionItems ，内置会再次屌用 _onNewContext
+			// 调用 _onNewContext 中会再次判断是否属于 column 改变 以及 incomplete size 大于 1 ，会触发tigger 进行 column 同步 再次回调 _onNewContext
+			return {
+				incomplete: true, // 设置为true 意味着下一次上下文 column 的改变
+				suggestions,
+			};
+		}
+	};
+	const container = maskCompletionItemProvider.provideCompletionItems(model, position, context, token) as modes.CompletionList;
+	const completionItemList = providerSuggestionGroup.getCompletionItemList(maskCompletionItemProvider, container);
+	return completionItemList.concat(providerSuggestionGroup.completionItemList);
+}
+
+
+
+
+/**
+ * update gts 2021-04-13
+ * 监听智能提示优先检索 主要用于解决尽早的异步请求动作
+ */
+export type ProviderSuggestionResultGroup = Array<
+	Array<{
+		provider: modes.CompletionItemProvider,
+		list: modes.CompletionList | null | undefined
+	} | undefined>
+>;
+
+export interface ProviderSuggestionGroup {
+	wait: () => Promise<any>;
+	completionItemList: Array<CompletionItem>;
+	durations: CompletionDurationEntry[];
+	disposables: DisposableStore;
+	needsClipboard: boolean;
+	inactiveProvider: Set<modes.CompletionItemProvider>;
+	onCompletionList: (provider: modes.CompletionItemProvider, container: modes.CompletionList | null | undefined, sw: StopWatch) => void;
+	getCompletionItemList: (provider: modes.CompletionItemProvider, container: modes.CompletionList | null | undefined) => Array<CompletionItem>;
+}
+export function providerSuggestionGroupRequest(
+	prevItems: CompletionItem[] = [],
 	model: ITextModel,
 	position: Position,
 	options: CompletionOptions = CompletionOptions.default,
 	context: modes.CompletionContext = { triggerKind: modes.CompletionTriggerKind.Invoke },
 	token: CancellationToken = CancellationToken.None
-): Promise<CompletionItemModel> {
-
-	const sw = new StopWatch(true);
+): ProviderSuggestionGroup {
 	position = position.clone();
-
+	const providerResultGroup: ProviderSuggestionResultGroup = [];
+	const result: CompletionItem[] = prevItems || [];
 	const word = model.getWordAtPosition(position);
 	const defaultReplaceRange = word ? new Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn) : Range.fromPositions(position);
 	const defaultRange = { replace: defaultReplaceRange, insert: defaultReplaceRange.setEndPosition(position.lineNumber, position.column) };
-
-	const result: CompletionItem[] = [];
 	const disposables = new DisposableStore();
 	const durations: CompletionDurationEntry[] = [];
 	let needsClipboard = false;
 
-	const onCompletionList = (provider: modes.CompletionItemProvider, container: modes.CompletionList | null | undefined, sw: StopWatch) => {
+	// 所有的未活动的
+	const inactiveProvider = new Set(modes.CompletionProviderRegistry.all(model));
+
+	const getCompletionItemList = (provider: modes.CompletionItemProvider, container: modes.CompletionList | null | undefined) => {
+		const completionItems: Array<CompletionItem> = [];
 		if (!container) {
-			return;
+			return completionItems;
 		}
 		for (let suggestion of container.suggestions) {
 			if (!options.kindFilter.has(suggestion.kind)) {
@@ -227,9 +308,18 @@ export async function provideSuggestionItems(
 				if (!needsClipboard && suggestion.insertTextRules && suggestion.insertTextRules & modes.CompletionItemInsertTextRule.InsertAsSnippet) {
 					needsClipboard = SnippetParser.guessNeedsClipboard(suggestion.insertText);
 				}
-				result.push(new CompletionItem(position, suggestion, container, provider));
+				completionItems.push(new CompletionItem(position, suggestion, container, provider));
 			}
 		}
+		return completionItems;
+	};
+
+	const onCompletionList = (provider: modes.CompletionItemProvider, container: modes.CompletionList | null | undefined, sw: StopWatch) => {
+		if (!container) {
+			return;
+		}
+		const completionItems = getCompletionItemList(provider, container);
+		result.push(...completionItems);
 		if (isDisposable(container)) {
 			disposables.add(container);
 		}
@@ -238,6 +328,85 @@ export async function provideSuggestionItems(
 		});
 	};
 
+	const startTask = async () => {
+		// add suggestions from contributed providers - providers are ordered in groups of
+		// equal score and once a group produces a result the process stops
+		// get provider groups, always add snippet suggestion provider
+		// 每次只会获取一次结果
+		for (let providerGroup of modes.CompletionProviderRegistry.orderedGroups(model)) {
+			// for each support in the group ask for suggestions
+			let lenBefore = result.length;
+
+			const providerResults = await Promise.all(providerGroup.map(async provider => {
+				if (options.providerFilter.size > 0 && !options.providerFilter.has(provider)) {
+					// 不在本次过滤中的 不做为下一次的需要记录活动 进行过滤剔除
+					inactiveProvider.delete(provider);
+					return;
+				}
+				try {
+					const list = await provider.provideCompletionItems(model, position, context, token);
+					const sw = new StopWatch(true);
+					onCompletionList(provider, list, sw);
+					inactiveProvider.delete(provider);
+					return {
+						provider,
+						list
+					};
+				} catch (err) {
+					onUnexpectedExternalError(err);
+				}
+				return;
+			}));
+			if (lenBefore !== result.length || token.isCancellationRequested) {
+				break;
+			}
+			providerResultGroup.push(providerResults);
+		}
+	};
+	const task = startTask();
+	/**
+	 * 获取当前已经请求完毕的结果集
+	 */
+	return {
+		onCompletionList,
+		getCompletionItemList,
+		get completionItemList() {
+			return result;
+		},
+		get inactiveProvider() {
+			return inactiveProvider;
+		},
+		get durations() {
+			return durations;
+		},
+		get disposables() {
+			return disposables;
+		},
+		get needsClipboard() {
+			return needsClipboard;
+		},
+		wait() {
+			return task;
+		}
+	};
+}
+
+export async function provideSuggestionItems(
+	model: ITextModel,
+	position: Position,
+	options: CompletionOptions = CompletionOptions.default,
+	context: modes.CompletionContext = { triggerKind: modes.CompletionTriggerKind.Invoke },
+	token: CancellationToken = CancellationToken.None,
+	providerSuggestionGroup?: ProviderSuggestionGroup,
+): Promise<CompletionItemModel> {
+
+	if (!providerSuggestionGroup) {
+		providerSuggestionGroup = providerSuggestionGroupRequest([], model, position, options, context, token);
+	}
+	const { onCompletionList } = providerSuggestionGroup;
+
+	await delay(0);
+	const sw = new StopWatch(true);
 	// ask for snippets in parallel to asking "real" providers. Only do something if configured to
 	// do so - no snippet filter, no special-providers-only request
 	const snippetCompletions = (async () => {
@@ -252,44 +421,23 @@ export async function provideSuggestionItems(
 		onCompletionList(_snippetSuggestSupport, list, sw);
 	})();
 
-	// add suggestions from contributed providers - providers are ordered in groups of
-	// equal score and once a group produces a result the process stops
-	// get provider groups, always add snippet suggestion provider
-	for (let providerGroup of modes.CompletionProviderRegistry.orderedGroups(model)) {
-
-		// for each support in the group ask for suggestions
-		let lenBefore = result.length;
-
-		await Promise.all(providerGroup.map(async provider => {
-			if (options.providerFilter.size > 0 && !options.providerFilter.has(provider)) {
-				return;
-			}
-			try {
-				const sw = new StopWatch(true);
-				const list = await provider.provideCompletionItems(model, position, context, token);
-				onCompletionList(provider, list, sw);
-			} catch (err) {
-				onUnexpectedExternalError(err);
-			}
-		}));
-
-		if (lenBefore !== result.length || token.isCancellationRequested) {
-			break;
-		}
-	}
-
+	// 等待所有请求完毕
+	await providerSuggestionGroup.wait();
 	await snippetCompletions;
+
+	// 取到最终的结果数据
+	const { disposables, needsClipboard, durations, completionItemList, inactiveProvider } = providerSuggestionGroup;
 
 	if (token.isCancellationRequested) {
 		disposables.dispose();
 		return Promise.reject<any>(canceled());
 	}
-
 	return new CompletionItemModel(
-		result.sort(getSuggestionComparator(options.snippetSortOrder)),
+		completionItemList.sort(getSuggestionComparator(options.snippetSortOrder)),
 		needsClipboard,
 		{ entries: durations, elapsed: sw.elapsed() },
 		disposables,
+		inactiveProvider,
 	);
 }
 

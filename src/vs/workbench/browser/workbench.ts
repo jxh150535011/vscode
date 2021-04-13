@@ -353,6 +353,8 @@ export class Workbench extends Layout {
 			this.getPart(id).create(partContainer, options);
 		});
 
+		console.log('DEBUG:workbench create workbench.parts.editor');
+
 		// Notification Handlers
 		this.createNotificationsHandlers(instantiationService, notificationService);
 

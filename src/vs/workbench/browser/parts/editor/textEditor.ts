@@ -69,7 +69,7 @@ export abstract class BaseTextEditor extends EditorPane implements ITextEditorPa
 		super(id, telemetryService, themeService, storageService);
 
 		this._instantiationService = instantiationService;
-
+		console.log('DEBUG:BaseTextEditor', this._instantiationService);
 		this.editorMemento = this.getEditorMemento<IEditorViewState>(editorGroupService, BaseTextEditor.TEXT_EDITOR_VIEW_STATE_PREFERENCE_KEY, 100);
 
 		this._register(this.textResourceConfigurationService.onDidChangeConfiguration(() => {
@@ -155,6 +155,7 @@ export abstract class BaseTextEditor extends EditorPane implements ITextEditorPa
 	protected createEditorControl(parent: HTMLElement, configuration: IEditorOptions): IEditor {
 
 		// Use a getter for the instantiation service since some subclasses might use scoped instantiation services
+		console.log('DEBUG:CodeEditorWidget', parent, configuration);
 		return this.instantiationService.createInstance(CodeEditorWidget, parent, configuration, {});
 	}
 
@@ -299,6 +300,7 @@ export abstract class BaseTextEditor extends EditorPane implements ITextEditorPa
 			const resource = this.getActiveResource();
 			if (resource) {
 				configuration = this.textResourceConfigurationService.getValue<IEditorConfiguration>(resource);
+				console.log('DEBUG:updateEditorConfiguration', configuration);
 			}
 		}
 

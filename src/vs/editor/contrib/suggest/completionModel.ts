@@ -47,6 +47,7 @@ export class CompletionModel {
 	private _filteredItems?: StrictCompletionItem[];
 	private _providerInfo?: Map<CompletionItemProvider, boolean>;
 	private _stats?: ICompletionStats;
+	private _inactiveProvider?: Set<CompletionItemProvider>; // 所有未活动的
 
 	constructor(
 		items: CompletionItem[],
@@ -55,7 +56,8 @@ export class CompletionModel {
 		wordDistance: WordDistance,
 		options: InternalSuggestOptions,
 		snippetSuggestions: 'top' | 'bottom' | 'inline' | 'none',
-		readonly clipboardText: string | undefined
+		readonly clipboardText: string | undefined,
+		inactiveProvider?: Set<CompletionItemProvider>,
 	) {
 		this._items = items;
 		this._column = column;
@@ -63,6 +65,7 @@ export class CompletionModel {
 		this._options = options;
 		this._refilterKind = Refilter.All;
 		this._lineContext = lineContext;
+		this._inactiveProvider = inactiveProvider;
 
 		if (snippetSuggestions === 'top') {
 			this._snippetCompareFn = CompletionModel._compareCompletionItemsSnippetsUp;
@@ -87,6 +90,10 @@ export class CompletionModel {
 	get items(): CompletionItem[] {
 		this._ensureCachedState();
 		return this._filteredItems!;
+	}
+
+	get inactiveProvider(): Set<CompletionItemProvider> {
+		return this._inactiveProvider ?? new Set();
 	}
 
 	get allProvider(): IterableIterator<CompletionItemProvider> {

@@ -84,6 +84,7 @@ class BrowserMain extends Disposable {
 		await domContentLoaded();
 		mark('code/willStartWorkbench');
 
+		console.log('Workbench', this.domElement);
 		// Create Workbench
 		const workbench = new Workbench(this.domElement, services.serviceCollection, services.logService);
 

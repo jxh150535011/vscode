@@ -14,9 +14,13 @@ import { Selection } from 'vs/editor/common/core/selection';
 import { ITextModel, IWordAtPosition } from 'vs/editor/common/model';
 import { CompletionItemProvider, StandardTokenType, CompletionContext, CompletionProviderRegistry, CompletionTriggerKind, CompletionItemKind } from 'vs/editor/common/modes';
 import { CompletionModel } from './completionModel';
-import { CompletionItem, getSuggestionComparator, provideSuggestionItems, getSnippetSuggestSupport, SnippetSortOrder, CompletionOptions, CompletionDurations } from './suggest';
+import {
+	CompletionItem, provideSuggestionItems, provideSuggestionMaskItems, providerSuggestionGroupRequest,
+	ProviderSuggestionGroup,
+	getSnippetSuggestSupport, SnippetSortOrder, CompletionOptions, CompletionDurations
+} from './suggest';
 import { SnippetController2 } from 'vs/editor/contrib/snippet/snippetController2';
-import { CancellationTokenSource } from 'vs/base/common/cancellation';
+import { CancellationTokenSource, CancellationToken } from 'vs/base/common/cancellation';
 import { IEditorWorkerService } from 'vs/editor/common/services/editorWorkerService';
 import { WordDistance } from 'vs/editor/contrib/suggest/wordDistance';
 import { EditorOption } from 'vs/editor/common/config/editorOptions';
@@ -101,6 +105,11 @@ export class SuggestModel implements IDisposable {
 	private _quickSuggestDelay: number = 10;
 	private readonly _triggerCharacterListener = new DisposableStore();
 	private readonly _triggerQuickSuggest = new TimeoutTimer();
+
+	/** update xingheng.jxh 用于延迟遮照UI */
+	private _quickSuggestMaskDelay: number = 200;
+	private readonly _triggerQuickSuggestMask = new TimeoutTimer();
+
 	private _state: State = State.Idle;
 
 	private _requestToken?: CancellationTokenSource;
@@ -384,6 +393,55 @@ export class SuggestModel implements IDisposable {
 		});
 	}
 
+	/**
+	 * update gts 2021-04-12
+	 * 用于遮盖
+	 */
+	private _showCompletionsMask(
+		providerSuggestionGroup: ProviderSuggestionGroup,
+		wordDistanceTask: Promise<WordDistance>,
+		suggestCtx: CompletionContext,
+		token: CancellationToken = CancellationToken.None
+	): (() => void) {
+		this._triggerQuickSuggestMask.cancel();
+		this._triggerQuickSuggestMask.cancelAndSet(() => {
+			if (this._state === State.Idle) {
+				return;
+			}
+			if (!this._editor.hasModel()) {
+				return;
+			}
+
+			const model = this._editor.getModel();
+			const position = this._editor.getPosition();
+			const ctx = new LineContext(model, position, this._state === State.Auto, false);
+
+			const completionsItemsTask = provideSuggestionMaskItems(
+				providerSuggestionGroup,
+				model,
+				position,
+				suggestCtx,
+				token,
+			);
+			Promise.all([completionsItemsTask, wordDistanceTask]).then(([completionsItems, wordDistance]) => {
+				// 根据传递入的 completionsItems 会提取出 allProvider
+				this._completionModel = new CompletionModel(completionsItems, this._context!.column, {
+					leadingLineContent: ctx.leadingLineContent,
+					characterCountDelta: ctx.column - this._context!.column
+				},
+					wordDistance,
+					this._editor.getOption(EditorOption.suggest),
+					this._editor.getOption(EditorOption.snippetSuggestions),
+					undefined
+				);
+				this._onNewContext(ctx);
+			});
+		}, this._quickSuggestMaskDelay);
+		return () => {
+			this._triggerQuickSuggestMask.cancel();
+		};
+	}
+
 	trigger(context: SuggestTriggerContext, retrigger: boolean = false, onlyFrom?: Set<CompletionItemProvider>, existing?: { items: CompletionItem[], clipboardText: string | undefined }): void {
 		if (!this._editor.hasModel()) {
 			return;
@@ -430,17 +488,40 @@ export class SuggestModel implements IDisposable {
 
 		const itemKindFilter = SuggestModel._createItemKindFilter(this._editor);
 		const wordDistance = WordDistance.create(this._editorWorkerService, this._editor);
-
-		const completions = provideSuggestionItems(
+		const completionOptions = new CompletionOptions(snippetSortOrder, itemKindFilter, onlyFrom);
+		const token = this._requestToken.token;
+		const position = this._editor.getPosition();
+		// update gts  2021-04-13
+		// 创建智能提示查询
+		const providerSuggestionGroup = providerSuggestionGroupRequest(
+			existing?.items, // 已经存在的items
 			model,
-			this._editor.getPosition(),
-			new CompletionOptions(snippetSortOrder, itemKindFilter, onlyFrom),
+			position,
+			completionOptions,
 			suggestCtx,
-			this._requestToken.token
+			token,
 		);
 
-		Promise.all([completions, wordDistance]).then(async ([completions, wordDistance]) => {
+		// update xingheng.jxh by gts 2021-04-12
+		// 统一的占位提示 通过 providerSuggestionGroup 可以快速获取指定时间那的返回内容
+		const completionsMaskDispose = this._showCompletionsMask(
+			providerSuggestionGroup,
+			wordDistance,
+			suggestCtx,
+			token,
+		);
+		const completions = provideSuggestionItems(
+			model,
+			position,
+			completionOptions,
+			suggestCtx,
+			token,
+			providerSuggestionGroup,
+		);
 
+
+		Promise.all([completions, wordDistance]).then(async ([completions, wordDistance]) => {
+			completionsMaskDispose();
 			this._requestToken?.dispose();
 
 			if (!this._editor.hasModel()) {
@@ -459,10 +540,11 @@ export class SuggestModel implements IDisposable {
 			const model = this._editor.getModel();
 			let items = completions.items;
 
-			if (existing) {
-				const cmpFn = getSuggestionComparator(snippetSortOrder);
-				items = items.concat(existing.items).sort(cmpFn);
-			}
+			// 已经在 providerSuggestionGroupRequest 中处理
+			// if (existing) {
+			// 	const cmpFn = getSuggestionComparator(snippetSortOrder);
+			// 	items = items.concat(existing.items).sort(cmpFn);
+			// }
 
 			const ctx = new LineContext(model, this._editor.getPosition(), auto, context.shy);
 			this._completionModel = new CompletionModel(items, this._context!.column, {
@@ -472,7 +554,8 @@ export class SuggestModel implements IDisposable {
 				wordDistance,
 				this._editor.getOption(EditorOption.suggest),
 				this._editor.getOption(EditorOption.snippetSuggestions),
-				clipboardText
+				clipboardText,
+				completions.inactiveProvider
 			);
 
 			// store containers so that they can be disposed later
@@ -547,7 +630,7 @@ export class SuggestModel implements IDisposable {
 	}
 
 	private _onNewContext(ctx: LineContext): void {
-
+		// console.log(4444, this._completionModel);
 		if (!this._context) {
 			// happens when 24x7 IntelliSense is enabled and still in its delay
 			return;
@@ -595,11 +678,13 @@ export class SuggestModel implements IDisposable {
 			return;
 		}
 
-		if (ctx.column > this._context.column && this._completionModel.incomplete.size > 0 && ctx.leadingWord.word.length !== 0) {
+		if (ctx.column > this._context.column && (this._completionModel.incomplete.size > 0 || this._completionModel.inactiveProvider.size > 0) && ctx.leadingWord.word.length !== 0) {
 			// typed -> moved cursor RIGHT & incomple model & still on a word -> retrigger
-			const { incomplete } = this._completionModel;
+			const { incomplete, inactiveProvider } = this._completionModel;
+			// 保留已有的结果内容 其余的进行二次触发
 			const items = this._completionModel.adopt(incomplete);
-			this.trigger({ auto: this._state === State.Auto, shy: false, triggerKind: CompletionTriggerKind.TriggerForIncompleteCompletions }, true, incomplete, { items, clipboardText: this._completionModel.clipboardText });
+			const providerFilter = new Set([...incomplete, ...inactiveProvider]);
+			this.trigger({ auto: this._state === State.Auto, shy: false, triggerKind: CompletionTriggerKind.TriggerForIncompleteCompletions }, true, providerFilter, { items, clipboardText: this._completionModel.clipboardText });
 
 		} else {
 			// typed -> moved cursor RIGHT -> update UI

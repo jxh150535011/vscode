@@ -57,6 +57,7 @@ export class EditorControl extends Disposable {
 
 		// Editor pane
 		const descriptor = Registry.as<IEditorRegistry>(EditorExtensions.Editors).getEditor(editor);
+		console.log('DEBUG: openEditor');
 		if (!descriptor) {
 			throw new Error(`No editor descriptor found for input id ${editor.getTypeId()}`);
 		}
@@ -109,7 +110,7 @@ export class EditorControl extends Disposable {
 			const editorPaneContainer = document.createElement('div');
 			editorPaneContainer.classList.add('editor-instance');
 			editorPaneContainer.setAttribute('data-editor-id', descriptor.getId());
-
+			console.log('DEBUG:doCreateEditorPane', descriptor.getId());
 			editorPane.create(editorPaneContainer);
 		}
 
@@ -154,7 +155,6 @@ export class EditorControl extends Disposable {
 		const forceReload = options?.forceReload;
 		const inputMatches = editorPane.input && editorPane.input.matches(editor);
 		if (inputMatches && !forceReload) {
-
 			// Forward options
 			editorPane.setOptions(options);
 
